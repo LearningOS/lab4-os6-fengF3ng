@@ -1,6 +1,9 @@
 //! Process management syscalls
 
-use crate::mm::{translated_refmut, translated_ref, translated_str};
+use crate::mm::{
+    translated_refmut, translated_str, 
+    MapPermission, VirtAddr, VPNRange, PageTable
+};
 use crate::task::{
     add_task, current_task, current_user_token, exit_current_and_run_next,
     suspend_current_and_run_next, TaskStatus,
@@ -112,12 +115,14 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 // YOUR JOB: 引入虚地址后重写 sys_get_time
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     let _us = get_time_us();
-    // unsafe {
-    //     *ts = TimeVal {
-    //         sec: us / 1_000_000,
-    //         usec: us % 1_000_000,
-    //     };
-    // }
+    let token = current_user_token();
+    let ts = translated_refmut(token, _ts);
+    unsafe {
+        *ts = TimeVal {
+            sec: _us / 1_000_000,
+            usec: _us % 1_000_000,
+        };
+    }
     0
 }
 
@@ -133,16 +138,103 @@ pub fn sys_set_priority(_prio: isize) -> isize {
 
 // YOUR JOB: 扩展内核以实现 sys_mmap 和 sys_munmap
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    -1
+    let start_va = VirtAddr::from(_start);
+    let end_va = VirtAddr::from(_start+_len);
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+
+    // check valid
+    if !start_va.aligned() {
+        println!("va aligned fail!");
+        return -1;
+    }
+    if (_port & !0x7 != 0) || (_port & 0x7 == 0) {
+        println!("port invalid");
+        return -1;
+    }
+    let vpn_range = VPNRange::new(start_va.floor(), end_va.ceil());
+    // check if mapped
+    for vpn in vpn_range {
+        match inner.memory_set.translate(vpn) {
+            Some(pte) => {
+                if pte.is_valid() {
+                    println!("already exist mapped page!");
+                    return -1;
+                }
+            },
+            None => (),
+        }
+    }
+    // map
+    let mut map_perm = MapPermission::U;
+    map_perm |= MapPermission::from_bits((_port as u8) << 1).unwrap();
+    inner.memory_set.insert_framed_area(
+        start_va,
+        end_va,
+        map_perm
+    );
+    // check if success
+    for vpn in vpn_range {
+        match inner.memory_set.translate(vpn) {
+            Some(pte) => (),
+            None => {
+                println!("sys_mmap fail!");
+                return -1;
+            },
+        }
+    }
+    0
 }
 
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    -1
+    let start_va = VirtAddr::from(_start);
+    let end_va = VirtAddr::from(_start+_len);
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+
+    // check valid
+    if !start_va.aligned() {
+        println!("va aligned fail!");
+        return -1;
+    }
+    let vpn_range = VPNRange::new(start_va.floor(), end_va.ceil());
+    // check unmapped
+    for vpn in vpn_range {
+        match inner.memory_set.translate(vpn) {
+            Some(pte) => {
+                if !pte.is_valid() {
+                    println!("unmapped!");
+                    return -1;
+                }
+            },
+            None => {
+                println!("sys_mmap fail!");
+                return -1;
+            },
+        }
+    }
+    // unmap
+    for vpn in vpn_range {
+        inner.memory_set.remove_area_with_start_vpn(vpn);
+    }
+    0
 }
 
 //
 // YOUR JOB: 实现 sys_spawn 系统调用
 // ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
 pub fn sys_spawn(_path: *const u8) -> isize {
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let current_task = current_task().unwrap();
+
+        let new_task = current_task.spawn(all_data.as_slice());
+        let pid = new_task.pid.0;
+        add_task(new_task);
+        pid as isize
+    } else {
+        -1
+    }
 }

@@ -166,4 +166,7 @@ impl File for OSInode {
         }
         total_write_size
     }
+    //fn info(&self, _st: *mut Stat) {
+//
+    //}
 }

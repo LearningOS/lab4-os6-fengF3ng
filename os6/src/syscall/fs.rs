@@ -10,6 +10,7 @@ use crate::fs::OpenFlags;
 use crate::fs::Stat;
 use crate::mm::UserBuffer;
 use alloc::sync::Arc;
+use crate::fs::{linkat, unlinkat};
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -93,13 +94,13 @@ Rust 接口： fn fstat(fd: i32, st: *mut Stat) -> i32
         st: 文件状态结构体
 */
 pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
+    let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if _fd >= inner.fd_table.len() {
         return -1;
     }
     if let Some(file) = &inner.fd_table[_fd] {
-        let token = current_user_token();
         let _st: *mut Stat = translated_refmut(token, _st);
         file.info(_st);
         0
@@ -131,7 +132,17 @@ Rust 接口： fn linkat(olddirfd: i32, oldpath: *const u8, newdirfd: i32, newpa
 */
 
 pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
-    -1
+    let token = current_user_token();
+    let old_name = translated_str(token, _old_name);
+    let old_name = old_name.as_str();
+    let new_name = translated_str(token, _new_name);
+    let new_name = new_name.as_str();
+    if old_name == new_name {
+        -1
+    } else {
+        linkat(old_name, new_name);
+        0
+    }
 }
 
 /*
@@ -155,5 +166,8 @@ Rust 接口： fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> i32
         文件不存在。
 */
 pub fn sys_unlinkat(_name: *const u8) -> isize {
-    -1
+    let token = current_user_token();
+    let name = translated_str(token, _name);
+    let name = name.as_str();
+    unlinkat(name)
 }
